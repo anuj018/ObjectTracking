@@ -1,0 +1,52 @@
+--index-url https://download.pytorch.org/whl/cu126
+
+# PyTorch and related libraries (CUDA 12.6 versions)
+torch==2.6.0+cu126
+torchvision==0.21.0+cu126
+torchaudio==2.6.0+cu126
+
+# Web framework for building APIs
+fastapi==0.115.7
+uvicorn==0.34.0
+
+# Azure Blob Storage client
+azure-storage-blob==12.24.1
+
+# Asynchronous libraries
+aiohttp==3.11.11
+aiofiles==24.1.0
+
+# Environment management
+python-dotenv==1.0.1
+
+# Computer vision & image processing
+opencv-python-headless==4.11.0.86
+numpy==1.26.4
+
+# Progress display
+tqdm==4.64.1
+
+# Object detection / segmentation (Ultralytics YOLO)
+ultralytics==8.3.69
+
+# FFmpeg wrapper for video processing
+ffmpeg-python==0.2.0
+
+# Miscellaneous utilities
+ollama==0.4.7
+
+# Transformer models and utilities
+transformers==4.48.3
+einops==0.8.1
+timm==1.0.14
+accelerate>=0.26.0
+sentencepiece==0.2.0
+
+# Face analysis
+deepface==0.0.93
+
+# TensorFlow Keras integration
+tf-keras==2.18.0
+
+# Human pose estimation
+mediapipe==0.10.21
