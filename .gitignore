@@ -1,0 +1,164 @@
+# Create .gitignore file
+cat > .gitignore << 'EOL'
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Large model files
+*.weights
+*.pt
+*.pth
+*.onnx
+*.bin
+
+# Logs and databases
+*.log
+*.sqlite
+*.db
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+EOL
+
+# Video files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+
+# Image files
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tif
+*.tiff
+
+# Input/output directories with large files
+input_videos/
+video_output/
+output_images/
+faces/
+camera1/
+
+# Data files
+*.pkl
+*.npy
+*.npz
+*.h5
+*.hdf5
+
+# Model checkpoints
+checkpoints/
+*.pb
+
+# Log files (in addition to *.log)
+*.out
+status_checker_logs.txt
+
+# Output files and directories
+output_jsons/
+**/crops/
+**/overlays/
+
+# CSV data
+*.csv
+
+# Temporary files
+.tmp/
+temp/
+tmp/
+**/yolo_standard/
+**/yolo_strict/
+
+# Specific directories with model files or large binaries
+**/checkpoints/
+**/assets/
+**/variables/
+**/model_data/
+**/outputs/
+
+# Specific file types found in your structure
+*.pb
+*.avi
+*.gif
+*.txt
+
+# Specific unneeded files
+=4.6.0
+
+# Data directories with sample images
+**/data/video/
+**/data/helpers/
+**/data/dataset/
+
+# Ignored directories at the root level
+0.8/
+2025-01-01/
+
+# Specific files in model directories
+**/variables.index
+**/variables.data-*
+**/variables_bkup.data-*
+**/keras_metadata.pb
+**/saved_model.pb
+
+# Config files that may contain sensitive info or are environment-specific
+*.yml
+
+# Any potential backup files
+*_bkup*
+*_backup*
+
+# Text files that are likely data files rather than code
+**/anchors/*.txt
+**/dataset/*.txt
+
+# Strange file name
+=4.6.0
+
+# Add these lines to your .gitignore
+yolov4_deepsort/checkpoints/yolov4-416/variables/variables.data-00000-of-00001
+yolov4_deepsort/data/yolov4.weights
+status_checker_logs.txt
+
+.env
+processor_segment_with_transreid_tanishq.py
+processor_segment_with_transreid_tanishq_2.py
