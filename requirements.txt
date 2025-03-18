@@ -6,7 +6,8 @@ torchvision==0.21.0+cu126
 torchaudio==2.6.0+cu126
 
 # Web framework for building APIs
-fastapi==0.115.7
+#fastapi==0.115.7
+fastapi
 uvicorn==0.34.0
 
 # Azure Blob Storage client
