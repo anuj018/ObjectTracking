@@ -24,8 +24,12 @@ from yolov4_deepsort.deep_sort.track import TrackState
 from ultralytics import YOLO
 from status_checker import improved_human_status
 from PIL import Image
-cfg.merge_from_file("/home/azureuser/workspace/Genfied/TransReID/configs/Market/vit_transreid.yml")  # Use the MSMT17 config
-cfg.TEST.WEIGHT = "/home/azureuser/workspace/Genfied/TransReID/models/vit_base_msmt.pth"  # Fine-tuned model weights
+BASE_DIR = os.getenv("BASE_DIR", "/app")
+cfg.merge_from_file(os.path.join(BASE_DIR, "TransReID/configs/Market/vit_transreid.yml"))
+cfg.TEST.WEIGHT = os.path.join(BASE_DIR, "TransReID/models/vit_base_msmt.pth")
+cfg.PRETRAIN_PATH = os.path.join(BASE_DIR, "TransReID/.cache/torch/checkpoints/jx_vit_base_p16_224-80ecf9dd.pth")
+# cfg.merge_from_file("/home/azureuser/workspace/Genfied/TransReID/configs/Market/vit_transreid.yml")  # Use the MSMT17 config
+# cfg.TEST.WEIGHT = "/home/azureuser/workspace/Genfied/TransReID/models/vit_base_msmt.pth"  # Fine-tuned model weights
 cfg.freeze()
 import mediapipe as mp
 
@@ -767,8 +771,10 @@ def process_video(file_path: str, output_path: str = 'output_video.mp4', info_fl
 
 if __name__ == "__main__":
     videofile_name = "video1_test_overlap"
-    video_path = f"/home/azureuser/workspace/Genfied/input_videos/{videofile_name}.mp4"
-    output_path = f"/home/azureuser/workspace/Genfied/input_videos/result_{videofile_name}_Transreid_lowconf_030325_wooverlap_logic.mp4"
+    video_path = os.path.join(BASE_DIR, "input_videos", f"{videofile_name}.mp4")
+    output_path = os.path.join(BASE_DIR, "input_videos", f"result_{videofile_name}_Transreid_lowconf_030325_wooverlap_logic.mp4")
+    # video_path = f"/home/azureuser/workspace/Genfied/input_videos/{videofile_name}.mp4"
+    # output_path = f"/home/azureuser/workspace/Genfied/input_videos/result_{videofile_name}_Transreid_lowconf_030325_wooverlap_logic.mp4"
     desired_fps = 25
     results = process_video(video_path, output_path, info_flag=True, desired_fps = desired_fps, images_folder="images/video2long")
     output_json_file = f"tracking_results_{videofile_name}_{desired_fps}fps.json"
