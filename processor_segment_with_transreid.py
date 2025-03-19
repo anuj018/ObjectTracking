@@ -371,6 +371,298 @@ class Segmentation_DeepSort:
 
         return overlap_area, bbox_area
 
+    def process_single_frame(self, frame, store_id=None, camera_id=None, frame_id=0):
+        """
+        Process a single image frame and extract required information.
+        
+        Args:
+            frame: Image as numpy array (BGR format for OpenCV)
+            store_id: Store identifier (optional)
+            camera_id: Camera identifier (optional)
+            frame_id: Frame identifier (optional)
+        
+        Returns:
+            Dictionary containing detection results and metadata
+        """
+        try:
+            frame_copy = frame.copy()
+            
+            # Get frame dimensions
+            height, width = frame.shape[:2]
+            
+            # Define the line_y value (10% from the top as in video processing)
+            shrink_percentage_top = 0.10
+            line_y = int(height * shrink_percentage_top)
+            
+            # Define green box
+            x1_box = 0
+            y1_box = line_y
+            x2_box = width
+            y2_box = height
+            
+            # Draw green box
+            cv2.rectangle(frame_copy, (x1_box, y1_box), (x2_box, y2_box), (0, 255, 0), 2)
+            
+            # Define ROI for entrance (same as in process method)
+            roi_x1, roi_y1, roi_x2, roi_y2 = (768, 270, 1152, 800)  # Entrance Region
+            
+            # Convert BGR to RGB for processing
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Run segmentation prediction
+            outputs = self.seg_predictor(frame)
+            instances = outputs["instances"]
+            person_indices = (instances.pred_classes == 0).nonzero().flatten()
+            
+            detections = []
+            if len(person_indices) > 0:
+                person_boxes = instances.pred_boxes.tensor[person_indices].cpu().numpy()
+                person_scores = instances.scores[person_indices].cpu().numpy()
+                person_masks = instances.pred_masks[person_indices].cpu().numpy()
+                
+                # Filter duplicates
+                person_boxes, person_scores, person_masks = filter_duplicate_detections(
+                    person_boxes, person_scores, person_masks, frame_copy, iou_threshold=0.9
+                )
+                
+                # Process each detection
+                person_count = 0
+                for i, bbox in enumerate(person_boxes):
+                    if self.is_blacklisted(bbox):
+                        continue
+                        
+                    score = person_scores[i]
+                    mask = person_masks[i]
+                    cv2.rectangle(frame_copy, (int(bbox[0]), int(bbox[1])),
+                                (int(bbox[2]), int(bbox[3])), (255, 255, 255), 2)
+                    person_count += 1
+                    
+                    green_box = [x1_box, y1_box, x2_box, y2_box]
+                    overlap_area, bbox_area = self.calculate_overlap(bbox, green_box)
+                    
+                    if overlap_area / bbox_area > 0.7:
+                        # Convert bbox to TLWH for DeepSORT
+                        tlwh_bbox = [bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]]
+                        detections.append((tlwh_bbox, score, "person", mask))
+                
+                logger.info(f"Number of persons detected: {person_count}")
+                
+            # Extract features for each detection
+            body_features = []
+            for det in detections:
+                tlwh_bbox, confidence, class_name, mask = det
+                x, y, w, h = map(int, tlwh_bbox)
+                crop = frame_rgb[y:y+h, x:x+w]
+                
+                if crop.size == 0:
+                    body_features.append(np.zeros((1,)))
+                    continue
+                    
+                crop_masked = crop_without_resize(frame, [x, y, x+w, y+h], mask)
+                crop_pil = Image.fromarray(cv2.cvtColor(crop_masked, cv2.COLOR_BGR2RGB))
+                crop_tensor = transform(crop_pil).unsqueeze(0).to(device)
+                
+                with torch.no_grad():
+                    feat = extract_features(model, crop_tensor).cpu().numpy()
+                    feat = feat.reshape(-1)
+                body_features.append(feat)
+            
+            # Create Detection objects
+            detections_objs = [Detection(bbox, score, class_name, feature) 
+                    for (bbox, score, class_name, _), feature in zip(detections, body_features)]
+            
+            # Process detections with NMS
+            boxes_np = np.array([d.tlwh for d in detections_objs]) if detections_objs else np.array([])
+            scores_np = np.array([d.confidence for d in detections_objs]) if detections_objs else np.array([])
+            classes_np = np.array([d.class_name for d in detections_objs]) if detections_objs else np.array([])
+            
+            if len(boxes_np) > 0:
+                indices = preprocessing.non_max_suppression(boxes_np, classes_np, self.nms_max_overlap, scores_np)
+                detections_objs = [detections_objs[i] for i in indices]
+            
+            # Update tracker
+            self.tracker.predict()
+            self.tracker.update(detections_objs)
+            
+            # Handle tracking results
+            active_tracks = []
+            entity_coordinates = []
+            
+            for track in self.tracker.tracks:
+                if track.state == TrackState.Tentative:
+                    bbox = track.to_tlbr()
+                    if not confirm_human(frame, bbox):
+                        self.false_positive_blacklist.append(bbox)
+                        track.mark_missed()
+                    else:
+                        if not getattr(track, "has_entered", False):
+                            has_entered, fraction = is_entering_store_percent(bbox, line_y)
+                            if has_entered:
+                                track.has_entered = True
+                                logger.info(f"Track {track.track_id} has entered the store")
+
+                if track.time_since_update > 1:
+                    bbox = track.to_tlbr()
+                    has_left, fraction = has_left_store_percent(bbox, line_y)
+                    has_entered, fraction = is_entering_store_percent(bbox, line_y)
+                    if has_left:
+                        if track.mean[5] < 0:
+                            self.tracker.mark_track_as_left(track)
+                            logger.info(f"y1 is {line_y}")
+                            logger.info(f"fraction is is {fraction}")
+                            logger.info(f"Mean is {track.mean}")
+                            logger.info(f"Track {track.track_id} has left the store (bbox y1: {bbox[1]} is above line {line_y}).")
+                    if has_entered:
+                        if track.mean[5] > 0:
+                            logger.info(f"fraction is is {fraction}")
+                            logger.info(f"Mean is {track.mean}")
+                            logger.info(f"Track {track.track_id} has entered the store (bbox y1: {bbox[1]} is above line {line_y}).")
+ 
+                # Skip if track is not confirmed or was missed
+                if not track.is_confirmed() or track.time_since_update > 1:
+                    continue
+                
+                # Get bounding box
+                bbox = track.to_tlbr()
+                
+                # Calculate center points
+                bbox_center_x = int(round((bbox[0] + bbox[2]) / 2))
+                bbox_center_y = int(round((bbox[1] + bbox[3]) / 2))
+                bbox_y_80 = int(round(bbox[1] + 0.8 * (bbox[3] - bbox[1])))
+                
+                # Get classification
+                current_timestamp = datetime.utcnow().timestamp()
+                classification, is_final = improved_human_status(
+                    track, current_timestamp, self.recent_entries, 
+                    self.previous_positions, roi_y1
+                )
+                
+                # Parse classification
+                if classification:
+                    if "_" in classification:
+                        classification_type, group_id_str = classification.split("_", 1)
+                        group_id = int(group_id_str)
+                    else:
+                        classification_type = classification
+                        group_id = None
+                else:
+                    classification_type = None
+                    group_id = None
+                
+                # Update counters if classification is finalized
+                if is_final and track.track_id not in self.counted_track_ids:
+                    if classification_type == "alone":
+                        self.singles += 1
+                    elif classification_type == "couple":
+                        self.couples += 1
+                    elif classification_type == "group":
+                        self.groups += 1
+                    self.counted_track_ids.add(track.track_id)
+                
+                # Update person status
+                if track.track_id not in self.person_status:
+                    self.person_status[track.track_id] = {"status": "", "group_id": ""}
+                if is_final:
+                    logger.info(f"finalizing status of {track.track_id} to {classification_type}")
+                    self.person_status[track.track_id]["status"] = classification_type if classification_type else ""
+                    self.person_status[track.track_id]["group_id"] = str(group_id) if group_id is not None else ""
+                else:
+                    # For non-finalized tracks, leave the status and group_id as empty strings.
+                    self.person_status[track.track_id]["status"] = ""
+                    self.person_status[track.track_id]["group_id"] = ""
+
+                
+                # Draw bounding box and text
+                color = colors[int(track.track_id) % len(colors)]
+                color = [i * 255 for i in color]
+                # color = (0, 255, 0)  # Green color for visualization
+                cv2.rectangle(frame_copy, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
+                
+                # Prepare text for display (ID and coordinates)
+                id_text = f"{track.get_class()}-{track.track_id}"
+                status_text = f"Status: {classification}" if classification else "Status: undetermined"
+                coord_text = f"({bbox_center_x}, {bbox_y_80})"
+
+                # Calculate text sizes for positioning
+                (id_width, id_height), _ = cv2.getTextSize(id_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
+                (status_width, status_height), _ = cv2.getTextSize(status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
+                id_text_size = cv2.getTextSize(id_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)[0]
+                coord_text_size = cv2.getTextSize(coord_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)[0]
+
+                # Draw background rectangles and texts
+                cv2.rectangle(frame_copy, 
+                            (int(bbox[0]), int(bbox[1]-35)), 
+                            (int(bbox[0])+id_width, int(bbox[1]-5)), 
+                            color, -1)
+                cv2.rectangle(frame_copy, 
+                            (int(bbox[0]), int(bbox[1]-70)), 
+                            (int(bbox[0])+status_width, int(bbox[1]-40)), 
+                            color, -1)
+
+                cv2.putText(frame_copy, id_text,
+                            (int(bbox[0]), int(bbox[1]-10)), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255,255,255), 2)
+                cv2.putText(frame_copy, status_text,
+                            (int(bbox[0]), int(bbox[1]-45)), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255,255,255), 2)
+
+                # Get text size (width, height) and baseline
+                (text_width, text_height), baseline = cv2.getTextSize(frame_num_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
+                # Define a margin from the top-right corner
+                margin = 10
+                # Calculate the coordinates for the text (top-right corner)
+                x = frame.shape[1] - text_width - margin
+                y = text_height + margin  # y-coordinate is measured from the top
+                cv2.putText(frame_copy, frame_num_text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+
+                
+                # Save track information
+                active_tracks.append(track.track_id)
+                if bbox_center_x is not None and bbox_center_y is not None:
+                    status = self.person_status.get(track.track_id, {}).get("status", "undetermined")
+                    group_id_str = self.person_status.get(track.track_id, {}).get("group_id", "")
+                    
+                    entity_coordinates.append({
+                        "person_id": str(track.track_id),
+                        "x_coord": bbox_center_x,
+                        "y_coord": bbox_y_80,
+                        "status": status,
+                        "group_id": group_id_str
+                    })
+            
+            # Draw entrance ROI
+            cv2.rectangle(frame_copy, (roi_x1, roi_y1), (roi_x2, roi_y2), (0, 0, 255), 2)
+            last_active_tracks = active_tracks
+            last_entity_coordinates = entity_coordinates
+            processing_fps = 1.0 / (time.time() - frame_start_time)
+            
+            # Create result dictionary
+            result = {
+                "camera_id": camera_id if camera_id else "unknown",
+                "store_id": store_id if store_id else "unknown",
+                "timestamp": datetime.utcnow().isoformat(),
+                "frame_number": frame_id,
+                "resolution": f"{width}x{height}",
+                "is_organised": True,
+                "no_of_people": len(active_tracks),
+                "entity_coordinates": entity_coordinates,
+                "singles": self.singles,
+                "couples": self.couples,
+                "groups": self.groups,
+                "processed_image": frame_copy  # Optional: return the processed image with annotations
+            }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error processing image: {e}", exc_info=True)
+            return {
+                "error": str(e),
+                "camera_id": camera_id if camera_id else "unknown",
+                "store_id": store_id if store_id else "unknown",
+                "timestamp": datetime.utcnow().isoformat(),
+                "status": "failed"
+            }
 
     def process(self, video_path: str, output_path: str = 'output_video.mp4', desired_fps = 1, images_folder="images/cam1"):
         """
@@ -544,8 +836,6 @@ class Segmentation_DeepSort:
                                     track.has_entered = True
                                     logger.info(f"Track {track.track_id} has entered the store tentative_check (bbox y1: {bbox[1]} is above line {line_y}).")
 
-                        
-                    
                     if track.time_since_update > 1:
                         bbox = track.to_tlbr()
                         has_left, fraction = has_left_store_percent(bbox, line_y)
