@@ -133,17 +133,22 @@ async def process_frame_data(frame_data):
             "total_people": detection_results.get('no_of_people', 0)
         }
         
-        # Add to buffer
-        if store_id not in frame_results:
-            frame_results[store_id] = {}
-        if camera_id not in frame_results[store_id]:
-            frame_results[store_id][camera_id] = []
+        # # Add to buffer
+        # if store_id not in frame_results:
+        #     frame_results[store_id] = {}
+        # if camera_id not in frame_results[store_id]:
+        #     frame_results[store_id][camera_id] = []
             
-        frame_results[store_id][camera_id].append(result)
-        
-        # Check if batch should be sent
-        if len(frame_results[store_id][camera_id]) >= BATCH_SIZE:
-            await send_batch(store_id, camera_id)
+        # frame_results[store_id][camera_id].append(result)
+        success = await send_detection_data([result])
+        if success:
+            logger.info(f"Successfully sent frame {frame_id} for store {store_id}, camera {camera_id}")
+        else:
+            logger.error(f"Failed to send frame {frame_id} for store {store_id}, camera {camera_id}")
+
+        # # Check if batch should be sent
+        # if len(frame_results[store_id][camera_id]) >= BATCH_SIZE:
+        #     await send_batch(store_id, camera_id)
             
     except Exception as e:
         logger.error(f"Error processing frame: {e}", exc_info=True)
@@ -249,12 +254,12 @@ async def main():
         # Handle shutdown
         logger.info("Consumer task cancelled, shutting down")
         
-        # Send any remaining batches
-        for store_id in frame_results:
-            for camera_id in frame_results[store_id]:
-                if frame_results[store_id][camera_id]:
-                    logger.info(f"Sending remaining batch for store {store_id}, camera {camera_id}")
-                    await send_batch(store_id, camera_id)
+        # # Send any remaining batches
+        # for store_id in frame_results:
+        #     for camera_id in frame_results[store_id]:
+        #         if frame_results[store_id][camera_id]:
+        #             logger.info(f"Sending remaining batch for store {store_id}, camera {camera_id}")
+        #             await send_batch(store_id, camera_id)
 
 if __name__ == "__main__":
     asyncio.run(main())

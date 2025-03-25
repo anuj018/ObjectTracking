@@ -1,0 +1,75 @@
+{
+    "system": {
+       "gpu_config": {
+         "enabled": true,
+         "devices": [0],
+         "memory_limit_mb_per_gpu": 4096,
+         "batch_size_per_gpu": 4,
+         "load_balancing": "memory_based"
+       },
+       "thread_pool": {
+         "max_workers": 8
+       },
+       "memory_management": {
+         "clear_cuda_cache_interval": 300,
+         "gc_interval": 120
+       }
+    },
+    "processing": {
+       "batch_interval": 0.3, 
+       "processing_fps": 5,
+       "mode": "batch" 
+    },
+    "buffer_settings": {
+       "max_size_per_camera": 60,
+       "max_total_size": 300,
+       "timeout_seconds": 5.0,
+       "drop_strategy": "smart",
+       "auto_adjust": true
+    },
+    "cameras": [
+      {
+        "rtsp_url": "rtsp://rtspstream:uyz0ckKp9DhRZqPWfciph@zephyr.rtsp.stream/movie",
+        "camera_id": "movie-stream",
+        "store_id": "store-001",
+        "priority": 10
+      },
+      {
+        "rtsp_url": "rtsp://rtspstream:uyz0ckKp9DhRZqPWfciph@zephyr.rtsp.stream/people",
+        "camera_id": "people-stream",
+        "store_id": "store-001",
+        "priority": 10
+      }
+    ],
+    "logging": {
+       "level": "INFO",
+       "file": "/var/log/rtsp-processor/processor.log",
+       "max_size_mb": 100,
+       "backup_count": 10,
+       "performance_logging_interval": 60
+    },
+    "output": {
+       "save_debug_frames": false,
+       "debug_frames_dir": "/var/log/rtsp-processor/debug-frames",
+       "save_frame_interval": 30,
+       "send_results": true
+    },
+    "network": {
+       "rtsp": {
+         "transport": "tcp", 
+         "reconnect_attempts": 5,
+         "reconnect_delay": 5
+       },
+       "result_sending": {
+         "endpoint": "http://analytics-server:8080/api/results",
+         "batch_size": 10, 
+         "timeout": 5.0, 
+         "retry_count": 3
+       }
+    },
+    "monitoring": {
+       "health_check_interval": 30,
+       "metrics_enabled": true,
+       "prometheus_port": 9090
+    }
+   }

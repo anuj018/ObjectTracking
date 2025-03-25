@@ -3,8 +3,9 @@
 import asyncio
 import logging
 import sys
-from typing import Dict, Any
-
+from typing import Dict, Any, List
+import os
+import json
 import aiohttp
 from detection_postprocessing import process_video_entries
 from config import config
@@ -28,8 +29,102 @@ if not DETECTION_ENDPOINT:
     logger.error("Detection endpoint not found in configuration.")
     sys.exit(1)
 
+# Number of retries for failed requests
+MAX_RETRIES = 3
+# Delay between retries (in seconds)
+RETRY_DELAY = 1
 
-async def send_detection_data(detections_jsonfile_path: str):
+def format_detection_data(detection_data: List[Dict]) -> Dict[str, Any]:
+    """
+    Process detection data directly without reading from a file.
+    
+    Args:
+        detection_data (List[Dict]): List containing detection results.
+        
+    Returns:
+        Dict[str, Any]: Formatted data ready to be sent to the endpoint.
+    """
+    if not detection_data or not isinstance(detection_data, list):
+        raise ValueError("Invalid detection data format")
+    
+    # Extract data from the first detection (assuming single-frame processing)
+    frame_data = detection_data[0]
+    
+    # Format according to API requirements
+    # Modify this to match your actual API format requirements
+    result = {
+        "timestamp": frame_data.get("timestamp"),
+        "store_id": frame_data.get("store_id"),
+        "camera_id": frame_data.get("camera_id"),
+        "detections": {
+            "frame_id": frame_data.get("frame_id"),
+            "singles": frame_data.get("singles", 0),
+            "couples": frame_data.get("couples", 0),
+            "groups": frame_data.get("groups", 0),
+            "total_people": frame_data.get("total_people", 0),
+            "coordinates": frame_data.get("entity_coordinates", [])
+        }
+    }
+    
+    return result
+
+async def send_detection_data(detection_data: List[Dict]) -> bool:
+    """
+    Processes the detection data and sends it directly to the API endpoint.
+    
+    Args:
+        detection_data (List[Dict]): List containing detection results.
+        
+    Returns:
+        bool: True if the data was sent successfully, False otherwise.
+    """
+    try:
+        # Process the detection data directly
+        formatted_data = format_detection_data(detection_data)
+        logger.info(f"Processed detection data for {detection_data[0].get('store_id')}, camera {detection_data[0].get('camera_id')}, frame {detection_data[0].get('frame_id')}")
+    except Exception as e:
+        logger.error(f"Failed to process detection data: {e}", exc_info=True)
+        return False
+    
+    # Implement retry logic
+    for attempt in range(MAX_RETRIES):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.put(DETECTION_ENDPOINT, json=formatted_data, timeout=10) as response:
+                    if response.status == 200:
+                        logger.info(f"Data sent successfully for frame {detection_data[0].get('frame_id')}.")
+                        response_text = await response.text()
+                        logger.debug(f"Response Text: {response_text}")
+                        return True
+                    else:
+                        logger.error(f"Failed to send data. Status: {response.status}")
+                        response_text = await response.text()
+                        logger.error(f"Response Text: {response_text}")
+                        
+                        # If this was the last attempt, return False
+                        if attempt == MAX_RETRIES - 1:
+                            return False
+                            
+                        # Otherwise wait before retrying
+                        logger.info(f"Retrying in {RETRY_DELAY} seconds (attempt {attempt+1}/{MAX_RETRIES})...")
+                        await asyncio.sleep(RETRY_DELAY)
+        except aiohttp.ClientError as client_error:
+            logger.error(f"HTTP Client error occurred: {client_error}", exc_info=True)
+            if attempt == MAX_RETRIES - 1:
+                return False
+            logger.info(f"Retrying in {RETRY_DELAY} seconds (attempt {attempt+1}/{MAX_RETRIES})...")
+            await asyncio.sleep(RETRY_DELAY)
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while sending data: {e}", exc_info=True)
+            if attempt == MAX_RETRIES - 1:
+                return False
+            logger.info(f"Retrying in {RETRY_DELAY} seconds (attempt {attempt+1}/{MAX_RETRIES})...")
+            await asyncio.sleep(RETRY_DELAY)
+    
+    # If all retries failed
+    return False
+
+async def send_detection_data_batches(detections_jsonfile_path: str):
     """
     Processes the raw JSON file and sends the formatted data to the detection API endpoint.
     
@@ -68,16 +163,38 @@ async def send_detection_data(detections_jsonfile_path: str):
         sys.exit(1)
 
 
+
 async def main():
     """
     The main entry point for the script.
     """
     # Define the path to your raw JSON file
-    detections_jsonfile_path = "demo_video_snippet.json"  # Update this path as needed
+    # detections_jsonfile_path = "demo_video_snippet.json"  # Update this path as needed
     
     # Optionally, you can make the JSON file path configurable via environment variables or command-line arguments
     
-    await send_detection_data(detections_jsonfile_path)
+    # await send_detection_data(detections_jsonfile_path)
+    test_detection = [{
+        "store_id": "test-store",
+        "camera_id": "test-camera",
+        "frame_id": 1,
+        "timestamp": "2023-01-01T00:00:00Z",
+        "processed_timestamp": "2023-01-01T00:00:01Z",
+        "entity_coordinates": [],
+        "singles": 1,
+        "couples": 0,
+        "groups": 0,
+        "total_people": 1
+    }]
+    
+    # Send the test detection data
+    success = await send_detection_data(test_detection)
+    
+    if success:
+        logger.info("Test data sent successfully.")
+    else:
+        logger.error("Failed to send test data after multiple attempts.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

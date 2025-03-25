@@ -17,7 +17,7 @@ from PIL import Image
 # Import your custom modules
 from processor_segment_with_transreid import Segmentation_DeepSort, confirm_human, compute_iou
 from processor_segment_with_transreid import is_entering_store_percent, has_left_store_percent, filter_duplicate_detections
-from processor_segment_with_transreid import crop_without_resize, setup_predictor, calculate_cosine_distance
+from processor_segment_with_transreid import crop_without_resize, setup_predictor
 from sender import send_detection_data
 
 # Initialize TransReID model
@@ -33,6 +33,8 @@ from yolov4_deepsort.deep_sort.detection import Detection
 from status_checker import improved_human_status
 
 from robust_frame_buffer import RobustFrameBuffer, FrameBufferStats
+
+from task_manager import TaskManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -202,7 +204,7 @@ class GPUBatchProcessor:
             List of (metadata, detections, features) tuples
         """
         start_time = time.time()
-        logger.info(f"Processing batch of {len(image_batch)} images on GPU")
+        # logger.info(f"Processing batch of {len(image_batch)} images on GPU")
         batch_results = []
         total_people = 0
         try:
@@ -575,6 +577,7 @@ class RTSPStreamProcessor:
         # self.gpu_processor = GPUBatchProcessor(max_batch_size=batch_size)
         set_memory_limit(fraction=0.9)
         self.num_processors = num_processors
+        self.active_processing_tasks = set()
 
         if gpu_processors is None:
             self.gpu_processors = [
@@ -621,6 +624,7 @@ class RTSPStreamProcessor:
             "last_stats_time": time.time(),
             "stats_interval": 60  # Log stats every minute
         }
+        self.task_manager = TaskManager()
         
         logger.info(f"Initialized RTSPStreamProcessor with {len(self.gpu_processors)} GPU processors")
         
@@ -685,6 +689,7 @@ class RTSPStreamProcessor:
         
         if not capture.isOpened():
             logger.error(f"Failed to open RTSP stream: {stream_info['url']}")
+            capture.release() 
             return False
         
         # Reset frame count and store the capture object
@@ -785,11 +790,16 @@ class RTSPStreamProcessor:
                 # self.frame_buffer.append((frame, metadata))
                 
                 # Check if it's time to process a batch
+                buffer_status = self.frame_buffer.get_buffer_status()
                 if ((not self.processing_busy and (current_time - self.last_process_time >= self.batch_interval)) or 
-                    (len(self.frame_buffer) >= self.gpu_processors[0].max_batch_size)):
-                    self.processing_busy = True
-                    asyncio.create_task(self.process_batch())
+                    (buffer_status['total_frames'] >= self.gpu_processors[0].max_batch_size)):
+                    # self.processing_busy = True
+                    # asyncio.create_task(self.process_batch())
+                    # self.task_manager.create_task(self.process_batch(), category="batch_processing")
+                    # self.active_processing_tasks.add(task)
+                    # task.add_done_callback(self._task_done_callback)
                     # await self.process_batch()
+                    self.task_manager.create_task(self.process_batch(), category="batch_processing")
                     self.last_process_time = current_time
 
                 # Log reader statistics periodically
@@ -812,6 +822,15 @@ class RTSPStreamProcessor:
             except Exception as e:
                 logger.error(f"Error in frame reader for camera {camera_id}: {e}", exc_info=True)
                 await asyncio.sleep(1)  # Sleep before retrying
+
+    def _task_done_callback(self, task):
+        """Callback function when a processing task completes."""
+        # Remove the task from our tracking set
+        self.active_processing_tasks.discard(task)
+        
+        # Check if it raised any exceptions
+        if not task.cancelled() and task.exception() is not None:
+            logger.error(f"Processing task failed with error: {task.exception()}")
     
     async def process_batch(self):
         """Process all frames in the current batch"""
@@ -827,18 +846,18 @@ class RTSPStreamProcessor:
                 logger.debug("No frames in buffer to process")
                 self.processing_busy = False
                 return
-        # if not self.frame_buffer:
-        #     return
-        # batch = await self.frame_buffer.get_next_batch(self.gpu_processor.max_batch_size)
-        # if not batch:
-        #     return  
-        # Get current buffer and clear it
-        # current_batch = self.frame_buffer.copy()
-        
-        # if not current_batch:
-        #     return
+           # if not self.frame_buffer:
+           #     return
+           # batch = await self.frame_buffer.get_next_batch(self.gpu_processor.max_batch_size)
+           # if not batch:
+           #     return  
+           # Get current buffer and clear it
+           # current_batch = self.frame_buffer.copy()
+
+           # if not current_batch:
+           #     return
             batch_start_time = time.time()
-            logger.info(f"Processing batch of {len(current_batch)} frames")
+            # logger.info(f"Processing batch of {len(current_batch)} frames")
         
             # Process batch on GPU (segmentation + feature extraction)
             # Use round-robin to select a GPU processor for processing this batch
@@ -900,8 +919,8 @@ class RTSPStreamProcessor:
 
                     # Add latency info to result
                     result['processing_latency'] = total_latency
-                    send_task = asyncio.create_task(send_detection_data([result]))
-                    send_tasks.append(send_task)
+                    # send_task = asyncio.create_task(send_detection_data([result]))
+                    # send_tasks.append(send_task)
                     logger.info(f"Processed frame {result['frame_number']} from camera {result['camera_id']} "
                                f"with {result['no_of_people']} people (latency: {total_latency*1000:.1f}ms)")
 
@@ -909,8 +928,8 @@ class RTSPStreamProcessor:
                     logger.error(f"Error processing task: {task_error}", exc_info=True)
             
             # Wait for all send tasks to complete
-            if send_tasks:
-                await asyncio.gather(*send_tasks)
+            # if send_tasks:
+                # await asyncio.gather(*send_tasks)
             # Log processing stats periodically
             current_time = time.time()
             if current_time - self.stats["last_stats_time"] > self.stats["stats_interval"]:
@@ -925,9 +944,14 @@ class RTSPStreamProcessor:
             buffer_status = self.frame_buffer.get_buffer_status()
             if buffer_status['total_frames'] > 0:
                 await asyncio.sleep(0.01)  # Small delay to prevent CPU spinning
-                asyncio.create_task(self.process_batch())
+                # asyncio.create_task(self.process_batch())
+                self.task_manager.create_task(self.process_batch(), category="batch_processing")
+
             else:
                 self.processing_busy = False
+        except Exception as e:  # Add this exception handler
+            logger.error(f"Error in process_batch: {e}")
+            self.processing_busy = False  # Make sure to 
                 
     def _log_processing_stats(self):
         """Log processing statistics"""
@@ -970,18 +994,37 @@ class RTSPStreamProcessor:
         logger.info("Starting RTSP Stream Processor")
         await initialize_processors(self.gpu_processors)
         await self.frame_buffer.start_monitors()
-        processing_task = asyncio.create_task(self._processing_loop())
+        # processing_task = asyncio.create_task(self._processing_loop())
+        processing_task = self.task_manager.create_task(self._processing_loop(), category="_processing_loop")
         
         # Start frame readers for all cameras
         frame_readers = []
         for camera_id in self.camera_streams:
-            frame_readers.append(asyncio.create_task(self.frame_reader_task(camera_id)))
+            self.task_manager.create_task(self.frame_reader_task(camera_id), category="frame_reader_task")
+            # frame_readers.append(frame_render)
         
         # Start health monitor
-        health_monitor = asyncio.create_task(self._health_monitor())
+        # health_monitor = asyncio.create_task(self._health_monitor())
+        self.task_manager.create_task(self._health_monitor(), category="_health_monitor")
     
-        all_tasks = frame_readers + [processing_task, health_monitor]
-        await asyncio.gather(*all_tasks)
+        # all_tasks = frame_readers + [processing_task, health_monitor]
+        try:
+            # Note: Even though these tasks are being tracked by the task manager,
+            # we still need to await them directly here to keep the run() method running
+            # await asyncio.gather(*all_tasks)
+            await processing_task
+        except asyncio.CancelledError:
+            logger.info("Main processing task was cancelled")
+        except Exception as e:
+            logger.error(f"Error in main task loop: {e}")
+            # # Cancel all tasks on error
+            # for task in all_tasks:
+            #     if not task.done():
+            #         task.cancel()
+        finally:
+            # Wait for any other background tasks managed by the task manager
+            # This will handle any other tasks created during execution
+            await self.task_manager.wait_for_all(timeout=5.0)
 
     async def _processing_loop(self):
         """Background task that ensures batch processing happens regularly"""
@@ -1051,6 +1094,12 @@ class RTSPStreamProcessor:
         """Stop the processor"""
         logger.info("Stopping RTSP Stream Processor")
         self.running = False
+        await self.task_manager.wait_for_all(timeout=5.0)
+        # Wait for all active processing tasks to complete
+        # if self.active_processing_tasks:
+        #     logger.info(f"Waiting for {len(self.active_processing_tasks)} active processing tasks to complete")
+        #     await asyncio.gather(*self.active_processing_tasks, return_exceptions=True)
+            
         try:
             await self.frame_buffer.stop()
         except Exception as e:
@@ -1184,7 +1233,8 @@ class FrameByFrameProcessor(RTSPStreamProcessor):
                     # Process this frame immediately
                     if not self.processing_busy:
                         self.processing_busy = True
-                        asyncio.create_task(self.process_single_frame())
+                        # asyncio.create_task(self.process_single_frame())
+                        self.task_manager.create_task(self.process_single_frame(), category="process_single_frame")
                         frames_processed += 1
                     else:
                         # If busy, skip individual processing and wait for batch
@@ -1296,7 +1346,8 @@ class FrameByFrameProcessor(RTSPStreamProcessor):
             buffer_status = self.frame_buffer.get_buffer_status()
             if buffer_status['total_frames'] > 0:
                 # Process next frame immediately
-                asyncio.create_task(self.process_single_frame())
+                # asyncio.create_task(self.process_single_frame())
+                self.task_manager.create_task(self.process_single_frame(), category="process_single_frame")
             else:
                 self.processing_busy = False
                 
