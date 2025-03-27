@@ -31,7 +31,7 @@ cfg.MODEL.PRETRAIN_PATH = os.path.join(BASE_DIR, "TransReID/.cache/torch/checkpo
 # cfg.merge_from_file("/home/azureuser/workspace/Genfied/TransReID/configs/Market/vit_transreid.yml")  # Use the MSMT17 config
 # cfg.TEST.WEIGHT = "/home/azureuser/workspace/Genfied/TransReID/models/vit_base_msmt.pth"  # Fine-tuned model weights
 cfg.freeze()
-logger.info(f"pretrain path is {cfg.PRETRAIN_PATH}, test weight is {cfg.TEST.WEIGHT}, ")
+# logger.info(f"pretrain path is {cfg.PRETRAIN_PATH}, test weight is {cfg.TEST.WEIGHT}, ")
 import mediapipe as mp
 
 # === 2️⃣ Load Model ===

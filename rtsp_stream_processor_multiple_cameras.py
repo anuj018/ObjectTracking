@@ -616,7 +616,7 @@ class CameraProcessor:
         # Create result dictionary
         result = {
             "camera_id": self.camera_id,
-            "image_url": ""
+            "image_url": "",
             "is_organised": True,
             "no_of_people": len(active_tracks),
             "store_id": self.store_id,
@@ -989,9 +989,9 @@ class RTSPStreamProcessor:
                     # if current_time - self.last_send_time >= self.send_interval:
                     #     send_task = asyncio.create_task(send_detection_data([result]))
                     #     send_tasks.append(send_task)
-                    self.last_send_time = current_time
-                    else:
-                        logger.debug("Skipping send to maintain configured send rate")
+                    # self.last_send_time = current_time
+                    # else:
+                    #     logger.debug("Skipping send to maintain configured send rate")
                 except Exception as task_error:
                     logger.error(f"Error processing task: {task_error}", exc_info=True)
             
@@ -1452,10 +1452,10 @@ async def main():
     # Load camera configuration
     processor = None
     try:
-        camera_config_remote = await fetch_camera_config(args.camera_endpoint)
+        # camera_config_remote = await fetch_camera_config(args.camera_endpoint)
         with open(args.config, 'r') as f:
             base_config = json.load(f)
-        base_config['cameras'] = camera_config_remote.get('cameras', [])
+        # base_config['cameras'] = camera_config_remote.get('cameras', [])
 
         system_config = base_config.get("system", {})
         buffer_config = base_config.get("buffer_settings", {})
