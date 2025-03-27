@@ -4,7 +4,7 @@ import numpy as np
 import uuid
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import torch
 from collections import defaultdict, deque
@@ -73,6 +73,58 @@ def set_memory_limit(fraction=0.9):
         torch.cuda.set_per_process_memory_fraction(fraction, device)
         
         logger.info(f"Set GPU memory limit to {fraction * 100:.0f}% of total ({max_memory / (1024**3):.2f} GB)")
+
+def get_time_window_list(image_batch):
+    """
+    Compute the batch time window (from and to timestamps) using list comprehension.
+    
+    Args:
+        image_batch: List of (image, metadata) tuples.
+    
+    Returns:
+        A tuple (from_timestamp, to_timestamp) in ISO format, or (None, None) if no valid timestamps.
+    """
+    timestamps = []
+    for _, metadata in image_batch:
+        ts_str = metadata.get('timestamp')
+        if ts_str:
+            try:
+                ts = datetime.fromisoformat(ts_str)
+                timestamps.append(ts)
+            except Exception as e:
+                logger.error(f"Error parsing timestamp {ts_str}: {e}")
+    
+    if timestamps:
+        return min(timestamps).isoformat(), max(timestamps).isoformat()
+    else:
+        return None, None
+
+def get_time_window_single_pass(image_batch):
+    """
+    Compute the batch time window (from and to timestamps) in a single pass.
+    
+    Args:
+        image_batch: List of (image, metadata) tuples.
+    
+    Returns:
+        A tuple (from_timestamp, to_timestamp) in ISO format, or (None, None) if no valid timestamps.
+    """
+    min_ts = None
+    max_ts = None
+    for _, metadata in image_batch:
+        ts_str = metadata.get('timestamp')
+        if ts_str:
+            try:
+                ts = datetime.fromisoformat(ts_str)
+            except Exception as e:
+                logger.error(f"Error parsing timestamp {ts_str}: {e}")
+                continue
+            if min_ts is None or ts < min_ts:
+                min_ts = ts
+            if max_ts is None or ts > max_ts:
+                max_ts = ts
+    return (min_ts.isoformat() if min_ts else None, 
+            max_ts.isoformat() if max_ts else None)
 
 async def initialize_processors(gpu_processors):
     """Initialize processors in sequence to avoid memory spikes"""
@@ -215,7 +267,9 @@ class GPUBatchProcessor:
         start_time = time.time()
         # logger.info(f"Processing batch of {len(image_batch)} images on GPU")
         batch_results = []
+        timestamps = []
         total_people = 0
+        
         try:
             # Step 1: Run segmentation on each image
             with torch.cuda.stream(self.stream):
@@ -563,14 +617,12 @@ class CameraProcessor:
         result = {
             "camera_id": self.camera_id,
             "image_url": ""
-            # "store_id": self.store_id,
-            "timestamp": timestamp,
-            "frame_number": frame_id,
-            # "resolution": f"{width}x{height}",
             "is_organised": True,
             "no_of_people": len(active_tracks),
+            "store_id": self.store_id,
+            "timestamp": timestamp,
+            "frame_number": frame_id,
             "persons": entity_coordinates,
-            "processed_timestamp": datetime.utcnow().isoformat()
         }
         
         return result, frame_copy
@@ -784,7 +836,6 @@ class RTSPStreamProcessor:
                 stream_info['frame_count'] += 1
                 stream_info['last_frame_time'] = current_time
                 frames_read += 1
-                
                 # Create metadata for this frame
                 metadata = {
                     'store_id': stream_info['store_id'],
@@ -864,9 +915,12 @@ class RTSPStreamProcessor:
 
            # if not current_batch:
            #     return
+           
             batch_start_time = time.time()
             # logger.info(f"Processing batch of {len(current_batch)} frames")
-        
+                    
+            from_ts, to_ts = get_time_window_list(current_batch)
+            logger.info(f"Batch time window (list approach): from {from_ts} to {to_ts}")
             # Process batch on GPU (segmentation + feature extraction)
             # Use round-robin to select a GPU processor for processing this batch
             processor = self._select_processor_for_batch()
@@ -917,7 +971,9 @@ class RTSPStreamProcessor:
             send_tasks = []
             for task, metadata in tasks:
                 try:
-                    result, annotated_frame = await task 
+                    result, annotated_frame = await task
+                    result["from_datetime"] = from_ts
+                    result["to_datetime"] = to_ts
                     # Calculate processing latency
                     queued_time = metadata.get('queued_time', time.time())
                     total_latency = time.time() - queued_time
