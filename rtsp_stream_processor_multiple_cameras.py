@@ -551,7 +551,7 @@ class CameraProcessor:
                     "person_id": str(track.track_id),
                     "x_coord": bbox_center_x,
                     "y_coord": bbox_y_80,
-                    "status": status,
+                    "type": status,
                     "group_id": group_id_str
                 })
         
@@ -562,13 +562,14 @@ class CameraProcessor:
         # Create result dictionary
         result = {
             "camera_id": self.camera_id,
+            "image_url": ""
             # "store_id": self.store_id,
             "timestamp": timestamp,
             "frame_number": frame_id,
             # "resolution": f"{width}x{height}",
             "is_organised": True,
             "no_of_people": len(active_tracks),
-            "entity_coordinates": entity_coordinates,
+            "persons": entity_coordinates,
             "processed_timestamp": datetime.utcnow().isoformat()
         }
         
@@ -932,7 +933,7 @@ class RTSPStreamProcessor:
                     # if current_time - self.last_send_time >= self.send_interval:
                     #     send_task = asyncio.create_task(send_detection_data([result]))
                     #     send_tasks.append(send_task)
-                        self.last_send_time = current_time
+                    self.last_send_time = current_time
                     else:
                         logger.debug("Skipping send to maintain configured send rate")
                 except Exception as task_error:
