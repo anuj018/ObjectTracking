@@ -13,6 +13,7 @@ import json
 import math
 import argparse
 from PIL import Image
+import aiohttp
 
 # Import your custom modules
 from processor_segment_with_transreid import Segmentation_DeepSort, confirm_human, compute_iou
@@ -90,6 +91,14 @@ async def initialize_processors(gpu_processors):
             allocated = torch.cuda.memory_allocated(processor.device) / (1024**2)
             reserved = torch.cuda.memory_reserved(processor.device) / (1024**2)
             logger.info(f"After initializing processor {i}: allocated={allocated:.1f}MB, reserved={reserved:.1f}MB")
+
+
+async def fetch_camera_config(url: str) -> dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            response.raise_for_status()  # raises an exception for non-200 responses
+            config = await response.json()
+            return config
 
 # Import needed to match original code
 class TrackState:
@@ -553,17 +562,13 @@ class CameraProcessor:
         # Create result dictionary
         result = {
             "camera_id": self.camera_id,
-            "store_id": self.store_id,
+            # "store_id": self.store_id,
             "timestamp": timestamp,
             "frame_number": frame_id,
-            "resolution": f"{width}x{height}",
+            # "resolution": f"{width}x{height}",
             "is_organised": True,
             "no_of_people": len(active_tracks),
             "entity_coordinates": entity_coordinates,
-            "singles": self.singles,
-            "couples": self.couples,
-            "groups": self.groups,
-            "total_people": len(active_tracks),
             "processed_timestamp": datetime.utcnow().isoformat()
         }
         
@@ -573,7 +578,7 @@ class CameraProcessor:
 class RTSPStreamProcessor:
     """Manages processing for multiple RTSP camera streams"""
     def __init__(self, num_processors = 2, batch_size=8, batch_interval=0.5, processing_fps=5,
-    gpu_processors=None, frame_buffer_config=None, thread_pool_size=8):
+    gpu_processors=None, frame_buffer_config=None, thread_pool_size=8, send_fps = 5):
         # self.gpu_processor = GPUBatchProcessor(max_batch_size=batch_size)
         set_memory_limit(fraction=0.9)
         self.num_processors = num_processors
@@ -625,6 +630,8 @@ class RTSPStreamProcessor:
             "stats_interval": 60  # Log stats every minute
         }
         self.task_manager = TaskManager()
+        self.send_interval = 1.0 / send_fps
+        self.last_send_time = time.time()
         
         logger.info(f"Initialized RTSPStreamProcessor with {len(self.gpu_processors)} GPU processors")
         
@@ -919,11 +926,15 @@ class RTSPStreamProcessor:
 
                     # Add latency info to result
                     result['processing_latency'] = total_latency
-                    # send_task = asyncio.create_task(send_detection_data([result]))
-                    # send_tasks.append(send_task)
                     logger.info(f"Processed frame {result['frame_number']} from camera {result['camera_id']} "
                                f"with {result['no_of_people']} people (latency: {total_latency*1000:.1f}ms)")
-
+                    # current_time = time.time()
+                    # if current_time - self.last_send_time >= self.send_interval:
+                    #     send_task = asyncio.create_task(send_detection_data([result]))
+                    #     send_tasks.append(send_task)
+                        self.last_send_time = current_time
+                    else:
+                        logger.debug("Skipping send to maintain configured send rate")
                 except Exception as task_error:
                     logger.error(f"Error processing task: {task_error}", exc_info=True)
             
@@ -1331,7 +1342,12 @@ class FrameByFrameProcessor(RTSPStreamProcessor):
             result['processing_latency'] = total_latency
             
             # Send result
-            await send_detection_data([result])
+            current_time = time.time()
+            if current_time - self.last_send_time >= self.send_interval:
+                await send_detection_data([result])
+                self.last_send_time = current_time
+            else:
+                logger.debug("Skipping send to maintain configured send rate")
             
             logger.info(f"Processed frame {frame_id} from camera {camera_id}: "
                       f"{len(detections)} detections, latency: {total_latency*1000:.1f}ms")
@@ -1363,55 +1379,100 @@ async def main():
     parser.add_argument('--batch-size', type=int, default=8, help='Maximum number of frames to process in a batch')
     parser.add_argument('--batch-interval', type=float, default=0.5, help='Maximum time to wait before processing a batch (seconds)')
     parser.add_argument('--fps', type=float, default=5, help='Frames per second to process from each camera')
+    parser.add_argument('--send_fps', type=float, default=5, help='How frequently to hit the send_detection function')
     
     args = parser.parse_args()
     
     logger.info("Starting RTSP Stream Processor service")
     
-    # Create processor
-    processor = RTSPStreamProcessor(
-        batch_size=args.batch_size,
-        batch_interval=args.batch_interval,
-        processing_fps=args.fps
-    )
+    # # Create processor
+    # processor = RTSPStreamProcessor(
+    #     batch_size=args.batch_size,
+    #     batch_interval=args.batch_interval,
+    #     processing_fps=args.fps
+    # )
     
     # Load camera configuration
+    processor = None
     try:
+        camera_config_remote = await fetch_camera_config(args.camera_endpoint)
         with open(args.config, 'r') as f:
-            camera_config = json.load(f)
+            base_config = json.load(f)
+        base_config['cameras'] = camera_config_remote.get('cameras', [])
+
+        system_config = base_config.get("system", {})
+        buffer_config = base_config.get("buffer_settings", {})
+        gpu_config = system_config.get("gpu_config", {})
+        memory_management = system_config.get("memory_management", {})
+        thread_pool_config = system_config.get("thread_pool", {})
+        thread_pool_size = thread_pool_config.get("max_workers", 8)
+        send_fps = args.send_fps
         
+
+
+        # Determine GPU settings
+        if gpu_config.get("enabled", False):
+            # Use the number of devices listed in the gpu_config
+            num_processors = gpu_config.get("num_processors", 2)
+            # Override batch_size per GPU if provided, else use the command-line argument
+            batch_size = gpu_config.get("batch_size_per_gpu", args.batch_size)
+        else:
+            num_processors = 2  # or any default value if GPUs are not enabled
+            batch_size = args.batch_size
+        
+        processor = RTSPStreamProcessor(
+            num_processors=num_processors,
+            batch_size=batch_size,
+            batch_interval=args.batch_interval,
+            processing_fps=args.fps,
+            frame_buffer_config=buffer_config,
+            thread_pool_size=thread_pool_size,
+            send_fps = send_fps
+        )
+
         # Add each camera
-        for camera in camera_config['cameras']:
-            processor.add_camera(
-                rtsp_url=camera['rtsp_url'],
-                camera_id=camera['camera_id'],
-                store_id=camera['store_id']
-            )
+        try:
+
+            for camera in base_config['cameras']:
+                processor.add_camera(
+                    rtsp_url=camera['rtsp_url'],
+                    camera_id=camera['camera_id'],
+                    store_id=camera['store_id']
+                )
+        except Exception as e:
+            logger.error(f"Error loading camera configuration: {e}", exc_info=True)
+            # default_config = {
+            #     "cameras": [
+            #         {
+            #             "rtsp_url": "rtsp://admin:password123@192.168.1.101:554/stream1",
+            #             "camera_id": "camera-001",
+            #             "store_id": "store-001"
+            #         },
+            #         {
+            #             "rtsp_url": "rtsp://admin:password123@192.168.1.102:554/stream1",
+            #             "camera_id": "camera-002",
+            #             "store_id": "store-001"
+            #         }
+            #     ]
+            # }
+
+            # logger.info("Using default camera configuration:")
+            # for camera in default_config['cameras']:
+            #     logger.info(f"  - Camera {camera['camera_id']} in store {camera['store_id']}: {camera['rtsp_url']}")
+            #     processor.add_camera(
+            #         rtsp_url=camera['rtsp_url'],
+            #         camera_id=camera['camera_id'],
+            #         store_id=camera['store_id']
+            #     )
+    
     except Exception as e:
-        logger.error(f"Error loading camera configuration: {e}", exc_info=True)
-        camera_config = {
-            "cameras": [
-                {
-                    "rtsp_url": "rtsp://admin:password123@192.168.1.101:554/stream1",
-                    "camera_id": "camera-001",
-                    "store_id": "store-001"
-                },
-                {
-                    "rtsp_url": "rtsp://admin:password123@192.168.1.102:554/stream1",
-                    "camera_id": "camera-002",
-                    "store_id": "store-001"
-                }
-            ]
-        }
-        
-        logger.info("Using default camera configuration:")
-        for camera in camera_config['cameras']:
-            logger.info(f"  - Camera {camera['camera_id']} in store {camera['store_id']}: {camera['rtsp_url']}")
-            processor.add_camera(
-                rtsp_url=camera['rtsp_url'],
-                camera_id=camera['camera_id'],
-                store_id=camera['store_id']
-            )
+        logger.error(f"Error reading the config file: {e}")
+
+        # Create the RTSPStreamProcessor with all relevant settings
+
+    if processor is None:
+        logger.error("Processor was not initialized. Exiting.")
+        return
     
     try:
         # Run the processor
@@ -1430,7 +1491,7 @@ async def frame_by_frame_main():
     """Main entry point for frame-by-frame RTSP processing service"""
     parser = argparse.ArgumentParser(description='Frame-by-Frame RTSP Stream Processor for Retail Analytics')
     parser.add_argument('--config', default='camera_config.json', help='Path to camera configuration file')
-    parser.add_argument('--fps', type=float, default=5, help='Frames per second to process from each camera')
+    parser.add_argument('--fps', type=float, default=30, help='Frames per second to process from each camera')
     
     args = parser.parse_args()
     

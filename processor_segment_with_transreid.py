@@ -27,10 +27,11 @@ from PIL import Image
 BASE_DIR = os.getenv("BASE_DIR", "/app")
 cfg.merge_from_file(os.path.join(BASE_DIR, "TransReID/configs/Market/vit_transreid.yml"))
 cfg.TEST.WEIGHT = os.path.join(BASE_DIR, "TransReID/models/vit_base_msmt.pth")
-cfg.PRETRAIN_PATH = os.path.join(BASE_DIR, "TransReID/.cache/torch/checkpoints/jx_vit_base_p16_224-80ecf9dd.pth")
+cfg.MODEL.PRETRAIN_PATH = os.path.join(BASE_DIR, "TransReID/.cache/torch/checkpoints/jx_vit_base_p16_224-80ecf9dd.pth")
 # cfg.merge_from_file("/home/azureuser/workspace/Genfied/TransReID/configs/Market/vit_transreid.yml")  # Use the MSMT17 config
 # cfg.TEST.WEIGHT = "/home/azureuser/workspace/Genfied/TransReID/models/vit_base_msmt.pth"  # Fine-tuned model weights
 cfg.freeze()
+logger.info(f"pretrain path is {cfg.PRETRAIN_PATH}, test weight is {cfg.TEST.WEIGHT}, ")
 import mediapipe as mp
 
 # === 2️⃣ Load Model ===
@@ -63,10 +64,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from azure.storage.blob import BlobServiceClient, ContentSettings
-blob_service_client = BlobServiceClient.from_connection_string(config.AZURE_CONNECTION_STRING)
-container_client = blob_service_client.get_container_client(config.AZURE_CONTAINER_NAME)
-logger.info(f"Connected to Azure container: {config.AZURE_CONTAINER_NAME}")
+# from azure.storage.blob import BlobServiceClient, ContentSettings
+# blob_service_client = BlobServiceClient.from_connection_string(config.AZURE_CONNECTION_STRING)
+# container_client = blob_service_client.get_container_client(config.AZURE_CONTAINER_NAME)
+# logger.info(f"Connected to Azure container: {config.AZURE_CONTAINER_NAME}")
 
 # Initialize MediaPipe Pose once (for efficiency)
 mp_pose = mp.solutions.pose
@@ -107,34 +108,34 @@ def confirm_human(image, bbox, min_keypoints=3, min_confidence=0.5):
     # Return True if enough keypoints are detected.
     return count >= min_keypoints
 
-def upload_video_to_azure(video_filepath: str, blob_name: str) -> str:
-    """
-    Uploads a video file to Azure Blob Storage.
+# def upload_video_to_azure(video_filepath: str, blob_name: str) -> str:
+#     """
+#     Uploads a video file to Azure Blob Storage.
 
-    Args:
-        video_filepath (str): The local path to the video file.
-        blob_name (str): The name to assign to the blob in Azure.
+#     Args:
+#         video_filepath (str): The local path to the video file.
+#         blob_name (str): The name to assign to the blob in Azure.
 
-    Returns:
-        str: The URL of the uploaded blob if successful, otherwise None.
-    """
-    try:
-        with open(video_filepath, "rb") as f:
-            file_bytes = f.read()
-        logger.info(f"Uploading video from {video_filepath} as blob '{blob_name}'")
-        # Upload the video file; overwrite if it already exists
-        container_client.upload_blob(
-            name=blob_name,
-            data=file_bytes,
-            overwrite=True,
-            content_settings=ContentSettings(content_type="video/mp4")
-        )
-        blob_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/{AZURE_CONTAINER_NAME}/{blob_name}"
-        logger.info(f"Upload successful. Blob URL: {blob_url}")
-        return blob_url
-    except Exception as e:
-        logger.error("Error uploading video", exc_info=True)
-        return None
+#     Returns:
+#         str: The URL of the uploaded blob if successful, otherwise None.
+#     """
+#     try:
+#         with open(video_filepath, "rb") as f:
+#             file_bytes = f.read()
+#         logger.info(f"Uploading video from {video_filepath} as blob '{blob_name}'")
+#         # Upload the video file; overwrite if it already exists
+#         container_client.upload_blob(
+#             name=blob_name,
+#             data=file_bytes,
+#             overwrite=True,
+#             content_settings=ContentSettings(content_type="video/mp4")
+#         )
+#         blob_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/{AZURE_CONTAINER_NAME}/{blob_name}"
+#         logger.info(f"Upload successful. Blob URL: {blob_url}")
+#         return blob_url
+#     except Exception as e:
+#         logger.error("Error uploading video", exc_info=True)
+#         return None
 
 def setup_predictor():
     """
@@ -1073,7 +1074,7 @@ if __name__ == "__main__":
 
 # After processing is complete, upload the video to Azure
     blob_name = os.path.basename(output_path)
-    uploaded_url = upload_video_to_azure(output_path, blob_name)
+    # uploaded_url = upload_video_to_azure(output_path, blob_name)
     if uploaded_url:
         logger.info(f"Video successfully uploaded to Azure: {uploaded_url}")
     else:
