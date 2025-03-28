@@ -1,26 +1,51 @@
 # database.py
-from sqlalchemy import create_engine, Column, String, Integer, DateTime
+import os
+import sqlalchemy as sa
+from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from config import config
-from datetime import datetime
 
-DATABASE_URL = config["database_url"]
+# Get database URL from environment variable
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    # Fallback for development or if env var isn't set
+    DATABASE_URL = "postgresql://tracking_user:your_secure_password@localhost:5432/tracking_system"
 
-# Determine if SQLite is used to set connect_args appropriately
-if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-else:
-    engine = create_engine(DATABASE_URL)
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+engine = create_engine(DATABASE_URL)
+Session = sessionmaker(bind=engine)
 Base = declarative_base()
 
-class ProcessedVideo(Base):
-    __tablename__ = "processed_videos"
-    id = Column(Integer, primary_key=True, index=True)
-    blob_name = Column(String, unique=True, index=True, nullable=False)
-    processed_at = Column(DateTime, default=datetime.utcnow)
+# Define your models
+class Store(Base):
+    __tablename__ = "stores"
+    
+    store_id = sa.Column(sa.Integer, primary_key=True)
+    store_name = sa.Column(sa.String, nullable=False)
+    
+class Camera(Base):
+    __tablename__ = "cameras"
+    
+    camera_id = sa.Column(sa.Integer, primary_key=True)
+    store_id = sa.Column(sa.Integer, sa.ForeignKey("stores.store_id"))
+    camera_name = sa.Column(sa.String)
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+class Track(Base):
+    __tablename__ = "tracks"
+    
+    track_id = sa.Column(sa.Integer, primary_key=True)
+    camera_id = sa.Column(sa.Integer, sa.ForeignKey("cameras.camera_id"))
+    first_seen = sa.Column(sa.DateTime)
+    last_seen = sa.Column(sa.DateTime)
+    is_active = sa.Column(sa.Boolean, default=True)
+
+class Feature(Base):
+    __tablename__ = "features"
+    
+    feature_id = sa.Column(sa.Integer, primary_key=True)
+    track_id = sa.Column(sa.Integer, sa.ForeignKey("tracks.track_id"))
+    feature_data = sa.Column(sa.LargeBinary)  # For numpy arrays
+    timestamp = sa.Column(sa.DateTime)
+
+def init_db():
+    """Initialize the database tables if they don't exist."""
+    Base.metadata.create_all(engine)

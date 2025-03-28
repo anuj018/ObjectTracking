@@ -1224,7 +1224,7 @@ class RTSPStreamProcessor:
 class FrameByFrameProcessor(RTSPStreamProcessor):
     """Processes frames individually rather than in batches"""
     
-    def __init__(self, processing_fps=5, gpu_processors=None, frame_buffer_config=None, thread_pool_size=8):
+    def __init__(self, num_processors = 2, processing_fps=5, gpu_processors=None, frame_buffer_config=None, thread_pool_size=8, send_fps = 5):
         # Call parent constructor but with batch_size=1
         super().__init__(
             batch_size=1, 
@@ -1232,7 +1232,9 @@ class FrameByFrameProcessor(RTSPStreamProcessor):
             processing_fps=processing_fps,
             gpu_processors=gpu_processors,
             frame_buffer_config=frame_buffer_config,
-            thread_pool_size=thread_pool_size
+            thread_pool_size=thread_pool_size,
+            send_fps = send_fps,
+            num_processors = num_processors
         )        
         # Override the thread pool to be slightly larger
         # self.thread_pool = ThreadPoolExecutor(max_workers=8)
@@ -1484,7 +1486,12 @@ async def main():
         # camera_config_remote = await fetch_camera_config(args.camera_endpoint)
         with open(args.config, 'r') as f:
             base_config = json.load(f)
-        # base_config['cameras'] = camera_config_remote.get('cameras', [])
+        # base_config['cameras'] = camera_config_remote
+
+        # If you need to ensure camera_config_remote is a list, you could add:
+        # if not isinstance(camera_config_remote, list):
+        #     base_config['cameras'] = []
+        #     print("Warning: Remote camera config is not a list.")
 
         system_config = base_config.get("system", {})
         buffer_config = base_config.get("buffer_settings", {})
@@ -1576,32 +1583,74 @@ async def main():
 async def frame_by_frame_main():
     """Main entry point for frame-by-frame RTSP processing service"""
     parser = argparse.ArgumentParser(description='Frame-by-Frame RTSP Stream Processor for Retail Analytics')
-    parser.add_argument('--config', default='camera_config.json', help='Path to camera configuration file')
+    parser.add_argument('--config', default='config/system_config.json', help='Path to camera configuration file')
     parser.add_argument('--fps', type=float, default=30, help='Frames per second to process from each camera')
-    
+    parser.add_argument('--send_fps', type=float, default=5, help='How frequently to hit the send_detection function')
+    parser.add_argument('--batch-size', type=int, default=1, help='Maximum number of frames to process in a batch')
+    parser.add_argument('--batch-interval', type=float, default=0.001, help='Maximum time to wait before processing a batch (seconds)')
+
     args = parser.parse_args()
     
     logger.info("Starting Frame-by-Frame RTSP Stream Processor service")
     
     # Create processor
-    processor = FrameByFrameProcessor(processing_fps=args.fps)
+    processor = None
     
     # Load camera configuration
     try:
         with open(args.config, 'r') as f:
-            camera_config = json.load(f)
+            base_config = json.load(f)
+        # base_config['cameras'] = camera_config_remote
+
+        # If you need to ensure camera_config_remote is a list, you could add:
+        # if not isinstance(camera_config_remote, list):
+        #     base_config['cameras'] = []
+        #     print("Warning: Remote camera config is not a list.")
+        system_config = base_config.get("system", {})
+        buffer_config = base_config.get("buffer_settings", {})
+        gpu_config = system_config.get("gpu_config", {})
+        memory_management = system_config.get("memory_management", {})
+        thread_pool_config = system_config.get("thread_pool", {})
+        thread_pool_size = thread_pool_config.get("max_workers", 8)
+        send_fps = args.send_fps
+    
+        # Determine GPU settings
+        if gpu_config.get("enabled", False):
+            # Use the number of devices listed in the gpu_config
+            num_processors = gpu_config.get("num_processors", 2)
+            # Override batch_size per GPU if provided, else use the command-line argument
+            # batch_size = gpu_config.get("batch_size_per_gpu", args.batch_size)
+        else:
+            num_processors = 2  # or any default value if GPUs are not enabled
+            # batch_size = args.batch_size
         
+        processor = FrameByFrameProcessor(
+            num_processors=num_processors,
+            processing_fps=args.fps,
+            frame_buffer_config=buffer_config,
+            thread_pool_size=thread_pool_size,
+            send_fps = send_fps
+        )
         # Add each camera
-        for camera in camera_config['cameras']:
-            processor.add_camera(
-                rtsp_url=camera['rtsp_url'],
-                camera_id=camera['camera_id'],
-                store_id=camera['store_id']
-            )
+        try:
+
+            for camera in base_config['cameras']:
+                processor.add_camera(
+                    rtsp_url=camera['rtsp_url'],
+                    camera_id=camera['camera_id'],
+                    store_id=camera['store_id']
+                )
+        except Exception as e:
+            logger.error(f"Error loading camera configuration: {e}", exc_info=True)
+
     except Exception as e:
-        logger.error(f"Error loading camera configuration: {e}", exc_info=True)
+        logger.error(f"Error loading camera configuration or reading config file: {e}", exc_info=True)
         # Use default configuration
         # (Same default configuration as in the original code)
+
+    if processor is None:
+        logger.error("Processor was not initialized. Exiting.")
+        return
         
     try:
         # Run the processor

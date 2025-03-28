@@ -10,6 +10,7 @@ from .track import TrackState
 import logging
 import os
 from collections import defaultdict
+from database import Session, Store, Camera, Track, Feature, init_db
 
 # Configure logger at the top of your module (or in a separate config module)
 LOG_FILENAME = "tracker.log"
