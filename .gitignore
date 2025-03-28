@@ -33,6 +33,7 @@ wheels/
 *.pth
 *.onnx
 *.bin
+TransReID/models
 
 # Logs and databases
 *.log

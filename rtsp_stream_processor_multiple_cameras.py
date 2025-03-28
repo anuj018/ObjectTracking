@@ -1428,7 +1428,9 @@ class FrameByFrameProcessor(RTSPStreamProcessor):
             # Send result
             current_time = time.time()
             if current_time - self.last_send_time >= self.send_interval:
-                await send_detection_data([result])
+                success = await send_detection_data([result])
+                if not success:
+                    logger.warning(f"Failed to send detection data for frame {frame_id}")
                 self.last_send_time = current_time
             else:
                 logger.debug("Skipping send to maintain configured send rate")
