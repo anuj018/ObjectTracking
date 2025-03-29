@@ -34,39 +34,33 @@ MAX_RETRIES = 3
 # Delay between retries (in seconds)
 RETRY_DELAY = 1
 
-def format_detection_data(detection_data: List[Dict]) -> Dict[str, Any]:
+
+def format_detection_data(detection_data: List[Dict]) -> List[Dict]:
     """
     Process detection data directly without reading from a file.
-    
     Args:
         detection_data (List[Dict]): List containing detection results.
-        
     Returns:
-        Dict[str, Any]: Formatted data ready to be sent to the endpoint.
+        List[Dict]: Formatted data ready to be sent to the endpoint as a list.
     """
     if not detection_data or not isinstance(detection_data, list):
         raise ValueError("Invalid detection data format")
     
-    # Extract data from the first detection (assuming single-frame processing)
-    frame_data = detection_data[0]
+    formatted_results = []
     
-    # Format according to API requirements
-    # Modify this to match your actual API format requirements
-    result = {
-        "timestamp": frame_data.get("timestamp"),
-        "store_id": frame_data.get("store_id"),
-        "camera_id": frame_data.get("camera_id"),
-        "detections": {
-            "frame_id": frame_data.get("frame_id"),
-            "singles": frame_data.get("singles", 0),
-            "couples": frame_data.get("couples", 0),
-            "groups": frame_data.get("groups", 0),
-            "total_people": frame_data.get("total_people", 0),
-            "coordinates": frame_data.get("entity_coordinates", [])
+    for frame_data in detection_data:
+        # Format according to API requirements
+        result = {
+            "camera_id": frame_data.get("camera_id", ""),
+            "image_url": frame_data.get("image_url", ""),
+            "is_organised": frame_data.get("is_organised", True),
+            "no_of_people": frame_data.get("no_of_people", 0),
+            "date_time": frame_data.get("date_time", ""),
+            "persons": frame_data.get("persons", [])
         }
-    }
+        formatted_results.append(result)
     
-    return result
+    return formatted_results
 
 async def send_detection_data(detection_data: List[Dict]) -> bool:
     """
@@ -81,7 +75,7 @@ async def send_detection_data(detection_data: List[Dict]) -> bool:
     try:
         # Process the detection data directly
         formatted_data = format_detection_data(detection_data)
-        logger.info(f"Processed detection data for {detection_data[0].get('store_id')}, camera {detection_data[0].get('camera_id')}, frame {detection_data[0].get('frame_id')}")
+        logger.info(f"Processed detection data for camera {detection_data[0].get('camera_id')}, frame {detection_data[0].get('frame_id')}")
     except Exception as e:
         logger.error(f"Failed to process detection data: {e}", exc_info=True)
         return False
@@ -90,7 +84,7 @@ async def send_detection_data(detection_data: List[Dict]) -> bool:
     for attempt in range(MAX_RETRIES):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.put(DETECTION_ENDPOINT, json=formatted_data, timeout=10) as response:
+                async with session.post(DETECTION_ENDPOINT, json=formatted_data, timeout=10) as response:
                     if response.status == 200:
                         logger.info(f"Data sent successfully for frame {detection_data[0].get('frame_id')}.")
                         response_text = await response.text()
@@ -145,7 +139,7 @@ async def send_detection_data_batches(detections_jsonfile_path: str):
     
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.put(DETECTION_ENDPOINT, json=formatted_data) as response:
+            async with session.post(DETECTION_ENDPOINT, json=formatted_data) as response:
                 if response.status == 200:
                     logger.info("Data sent successfully.")
                     response_text = await response.text()

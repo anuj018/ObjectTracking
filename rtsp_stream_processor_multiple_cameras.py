@@ -253,6 +253,134 @@ class GPUBatchProcessor:
                 abs(bbox[3] - bb[3]) <= tolerance):
                 return True
         return False
+
+    def process_single_frame(self, image, metadata):
+        """
+        Optimized processing of a single image frame.
+        
+        Args:
+            image: The image frame (numpy array).
+            metadata: Associated metadata dictionary.
+            
+        Returns:
+            A tuple (metadata, valid_detections, detection_features), where:
+            - valid_detections is a list of detection tuples (bbox, score, class, mask)
+            - detection_features is a list of corresponding feature vectors.
+        """
+        start_time = time.time()
+        try:
+            # Use the dedicated CUDA stream for asynchronous operations.
+            with torch.cuda.stream(self.stream):
+                # Run segmentation on the single image.
+                outputs = self.seg_predictor(image)
+                instances = outputs["instances"]
+                # Select detections classified as person (assuming class 0 is person).
+                person_indices = (instances.pred_classes == 0).nonzero().flatten()
+                if len(person_indices) == 0:
+                    # Update statistics and synchronize the stream.
+                    self.stats["total_processing_time"] += time.time() - start_time
+                    self.stats["total_batches_processed"] += 1
+                    self.stats["total_frames_processed"] += 1
+                    self._update_memory_stats()
+                    self.stream.synchronize()
+                    return (metadata, [], [])
+                
+                # Get boxes, scores, and masks for the detected persons.
+                person_boxes = instances.pred_boxes.tensor[person_indices].cpu().numpy()
+                person_scores = instances.scores[person_indices].cpu().numpy()
+                person_masks = instances.pred_masks[person_indices].cpu().numpy()
+                
+                # Optionally filter duplicate detections.
+                # frame_copy = image.copy()  # Only needed if visualizing or debugging duplicates.
+                filtered_boxes, filtered_scores, filtered_masks = filter_duplicate_detections(
+                    person_boxes, person_scores, person_masks, image, iou_threshold=0.9
+                )
+                
+                # Define a “green box” (or entrance region) for overlap filtering.
+                height, width = image.shape[:2]
+                line_y = int(height * 0.10)  # e.g., 10% from the top.
+                green_box = [0, line_y, width, height]
+                
+                valid_detections = []
+                detection_crops = []
+                # Iterate over filtered detections.
+                # Convert the entire frame once to RGB
+                # if 'converted_frame' not in locals():
+                converted_frame = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                for j, bbox in enumerate(filtered_boxes):
+                    if self.is_blacklisted(bbox):
+                        continue
+                    score = filtered_scores[j]
+                    mask = filtered_masks[j]
+                    overlap_area, bbox_area = self.calculate_overlap(bbox, green_box)
+                    if overlap_area / bbox_area > 0.7:
+                        # Convert bbox to [x, y, width, height] format for DeepSORT.
+                        tlwh_bbox = [bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]]
+                        detection = (tlwh_bbox, score, "person", mask)
+                        valid_detections.append(detection)
+                        
+                        # Prepare crop for feature extraction.
+                        x, y, w, h = map(int, tlwh_bbox)
+                        crop_masked = crop_without_resize(converted_frame, [x, y, x + w, y + h], mask)
+                        if crop_masked.size == 0 or w <= 0 or h <= 0:
+                            continue
+                        # Convert crop to PIL and apply transformation.
+                        crop_pil = Image.fromarray(crop_masked)
+                        # crop_pil = Image.fromarray(cv2.cvtColor(crop_masked, cv2.COLOR_BGR2RGB))
+                        transformed_crop = self.transform(crop_pil).unsqueeze(0)
+                        detection_crops.append(transformed_crop)
+                
+                # If no valid detections remain, return empty results.
+                if not valid_detections:
+                    self.stats["total_processing_time"] += time.time() - start_time
+                    self.stats["total_batches_processed"] += 1
+                    self.stats["total_frames_processed"] += 1
+                    self._update_memory_stats()
+                    self.stream.synchronize()
+                    return (metadata, [], [])
+                
+                # Process detection crops in mini-batches (if needed).
+                detection_features = [None] * len(valid_detections)
+                if detection_crops:
+                    for start_idx in range(0, len(detection_crops), self.max_batch_size):
+                        end_idx = min(start_idx + self.max_batch_size, len(detection_crops))
+                        mini_batch = detection_crops[start_idx:end_idx]
+                        batch_tensor = torch.cat(mini_batch, dim=0).to(self.device)
+                        
+                        if self.use_half_precision and self.device.type == "cuda":
+                            batch_tensor = batch_tensor.half()
+                        
+                        with torch.no_grad():
+                            features = self.extract_features(self.model, batch_tensor).cpu().float().numpy()
+                        
+                        # Assign extracted features to their corresponding detection.
+                        for idx, feat_idx in enumerate(range(start_idx, end_idx)):
+                            detection_features[feat_idx] = features[idx].reshape(-1)
+                
+                # For any detection missing features, insert a zero vector.
+                for i in range(len(detection_features)):
+                    if detection_features[i] is None:
+                        detection_features[i] = np.zeros((768,))
+                
+                # Update processing stats.
+                self.stats["total_processing_time"] += time.time() - start_time
+                self.stats["total_batches_processed"] += 1
+                self.stats["total_frames_processed"] += 1
+                self.stats["total_people_detected"] += len(valid_detections)
+                self._update_memory_stats()
+                self.stream.synchronize()
+                
+                return (metadata, valid_detections, detection_features)
+        
+        except torch.cuda.OutOfMemoryError:
+            logger.error(f"CUDA out of memory error on {self.device}")
+            torch.cuda.empty_cache()
+            return (metadata, [], [])
+        
+        except Exception as e:
+            logger.error(f"Error processing single frame on {self.device}: {e}", exc_info=True)
+            return (metadata, [], [])
+
     
     def process_batch(self, image_batch):
         """
@@ -290,9 +418,9 @@ class GPUBatchProcessor:
                     person_masks = instances.pred_masks[person_indices].cpu().numpy()
                     
                     # Filter duplicate detections
-                    frame_copy = image.copy()  # For visualization of suppressed boxes
+                    # frame_copy = image.copy()  # For visualization of suppressed boxes
                     filtered_boxes, filtered_scores, filtered_masks = filter_duplicate_detections(
-                        person_boxes, person_scores, person_masks, frame_copy, iou_threshold=0.9
+                        person_boxes, person_scores, person_masks, image, iou_threshold=0.9
                     )
                     
                     # Get frame dimensions for green box
@@ -485,7 +613,7 @@ class CameraProcessor:
             Dictionary containing tracking results
         """
         self.frame_count += 1
-        frame_copy = frame.copy()
+        # frame_copy = frame.copy()
         height, width = frame.shape[:2]
         
         # Define the line_y value (entrance line)
@@ -495,11 +623,11 @@ class CameraProcessor:
         # Draw green box
         x1_box, y1_box = 0, line_y
         x2_box, y2_box = width, height
-        cv2.rectangle(frame_copy, (x1_box, y1_box), (x2_box, y2_box), (0, 255, 0), 2)
+        # cv2.rectangle(frame_copy, (x1_box, y1_box), (x2_box, y2_box), (0, 255, 0), 2)
         
         # Define ROI for entrance
         roi_x1, roi_y1, roi_x2, roi_y2 = (768, 270, 1152, 800)
-        cv2.rectangle(frame_copy, (roi_x1, roi_y1), (roi_x2, roi_y2), (0, 0, 255), 2)
+        # cv2.rectangle(frame_copy, (roi_x1, roi_y1), (roi_x2, roi_y2), (0, 0, 255), 2)
         
 
         detection_objs = [
@@ -603,10 +731,14 @@ class CameraProcessor:
                 
                 entity_coordinates.append({
                     "person_id": str(track.track_id),
-                    "x_coord": bbox_center_x,
-                    "y_coord": bbox_y_80,
                     "type": status,
-                    "group_id": group_id_str
+                    "group_id": group_id_str,
+                    "coords": {
+                        "x": str(bbox_center_x),
+                        "y": str(bbox_y_80),
+                    }
+
+                    
                 })
         
         # Save tracker state - only save every 30 frames to reduce I/O
@@ -615,15 +747,17 @@ class CameraProcessor:
         
         # Create result dictionary
         result = {
-            "camera_id": self.camera_id,
+            "camera_id": str(self.camera_id),
             "image_url": "",
+            "frame_id": frame_id,
             "is_organised": True,
-            "no_of_people": len(active_tracks),
+            "no_of_people": int(len(active_tracks)),
             "date_time": timestamp,
             "persons": entity_coordinates,
         }
         
-        return result, frame_copy
+        # return result, frame_copy
+        return result
 
 
 class RTSPStreamProcessor:
@@ -970,7 +1104,43 @@ class RTSPStreamProcessor:
             results_to_send = []  # Create a list to store all results
             for task, metadata in tasks:
                 try:
-                    result, annotated_frame = await task
+                    # result, annotated_frame = await task
+                    result = await task
+
+                    # Ensure all required fields are present regardless of detection count
+                    if "image_url" not in result or not result["image_url"]:
+                        result["image_url"] = ""  # Default empty string if not already set
+
+                    if "camera_id" not in result or not result["camera_id"]:
+                        result["camera_id"] = ""  # Default empty string if not already set
+
+                    if "is_organised" not in result:
+                        result["is_organised"] = True  # Default to True
+                        
+                    # Make sure date_time is properly set
+                    if "date_time" not in result or not result["date_time"]:
+                        result["date_time"] = metadata["timestamp"]
+
+                    if "persons" not in result:
+                        result["persons"] = []
+                    
+                    # if result["persons"]:
+                    #     for person in result["persons"]:
+                    #         if "coords" not in person:
+                    #             person["coords"] = {
+                    #                 "x": str(person.pop("x_coord", 0)),
+                    #                 "y": str(person.pop("y_coord", 0))
+                    #                 }
+                    
+                            # # Ensure all required person fields exist
+                            # if "person_id" not in person:
+                            #     person["person_id"] = "unknown"
+                            # if "type" not in person:
+                            #     person["type"] = "unknown"
+                            # if "group_id" not in person:
+                            #     person["group_id"] = ""
+
+                    results_to_send.append(result)
                     # result["from_datetime"] = from_ts
                     # result["to_datetime"] = to_ts
                     # Calculate processing latency
@@ -984,7 +1154,6 @@ class RTSPStreamProcessor:
                     # result['processing_latency'] = total_latency
                     logger.info(f"Processed frame {frame_id} from camera {result['camera_id']} "
                                f"with {result['no_of_people']} people (latency: {total_latency*1000:.1f}ms)")
-                    results_to_send.append(result)
                     current_time = time.time()
                     if current_time - self.last_send_time >= self.send_interval:
                         send_task = asyncio.create_task(send_detection_data(results_to_send))
@@ -1236,6 +1405,59 @@ class FrameByFrameProcessor(RTSPStreamProcessor):
         # self.thread_pool = ThreadPoolExecutor(max_workers=8)
         logger.info("Initialized FrameByFrameProcessor for immediate frame processing")
     
+    async def continuous_frame_processor(self):
+        """Continuously process frames from the buffer without creating new tasks each time."""
+        loop = asyncio.get_running_loop()
+        while self.running:
+            # Fetch a single frame (or a small batch) from the buffer.
+            frame_batch = await self.frame_buffer.get_next_batch(1, strategy='oldest')
+            if not frame_batch:
+                await asyncio.sleep(0.001)
+                continue
+
+            # Unpack the frame and metadata.
+            frame, metadata = frame_batch[0]
+            
+            # Select a GPU processor (for simplicity, we assume one processor here)
+            processor = self.gpu_processors[0]
+            
+            # Process the frame on the GPU
+            metadata, detections, features = await loop.run_in_executor(
+                None,
+                lambda: processor.process_single_frame(frame, metadata)
+            )
+
+            # If no detections, skip to the next frame
+            if not detections:
+                continue
+
+            # Process with the camera-specific tracker on the CPU
+            cam_processor = self.get_camera_processor(metadata['camera_id'], metadata['store_id'])
+            result, annotated_frame = await loop.run_in_executor(
+                self.thread_pool,
+                cam_processor.process_frame,
+                frame,
+                metadata['frame_id'],
+                detections,
+                features,
+                metadata['timestamp']
+            )
+
+            # Immediately dispatch the result
+            await send_detection_data([result])
+            logger.info(f"Processed frame {metadata['frame_id']} from camera {metadata['camera_id']}")
+
+    async def run(self):
+        """Optimized run method using a continuous frame processor."""
+        logger.info("Starting Optimized Frame-By-Frame Processor")
+        await initialize_processors(self.gpu_processors)
+        await self.frame_buffer.start_monitors()
+        # Start the optimized continuous processing loop once
+        self.task_manager.create_task(self.continuous_frame_processor(), category="continuous_processor")
+        # Optionally, start health monitoring or other background tasks
+        self.task_manager.create_task(self._health_monitor(), category="health_monitor")
+        await self.task_manager.wait_for_all(timeout=5.0)
+    
     async def frame_reader_task(self, camera_id):
         """Override the frame reader to process each frame immediately"""
         logger.info(f"Starting frame-by-frame reader for camera {camera_id}")
@@ -1366,24 +1588,24 @@ class FrameByFrameProcessor(RTSPStreamProcessor):
             if not single_frame_batch:
                 self.processing_busy = False
                 return
-            
+            frame, metadata = single_frame_batch[0]
             # Select GPU processor using round-robin
             processor = self.gpu_processors[self.current_processor_index]
             self.current_processor_index = (self.current_processor_index + 1) % len(self.gpu_processors)
             
             # Process on selected GPU
             loop = asyncio.get_running_loop()
-            batch_results = await loop.run_in_executor(
+            metadata, detections, features = await loop.run_in_executor(
                 None,
-                lambda: processor.process_batch(single_frame_batch)
+                lambda: processor.process_single_frame(frame, metadata)
             )
             
-            # Should only have one result
-            if not batch_results:
-                self.processing_busy = False
-                return
+            # # Should only have one result
+            # if not batch_results:
+            #     self.processing_busy = False
+            #     return
                 
-            metadata, detections, features = batch_results[0]
+            # metadata, detections, features = batch_results[0]
             
             # Skip if no detections
             if not detections:
@@ -1396,13 +1618,14 @@ class FrameByFrameProcessor(RTSPStreamProcessor):
             timestamp = metadata['timestamp']
             
             # Get the original frame
-            frame, _ = single_frame_batch[0]
+            # frame, _ = single_frame_batch[0]
             
             # Get camera processor
             processor = self.get_camera_processor(camera_id, store_id)
             
             # Process with camera-specific tracker
-            result, annotated_frame = await loop.run_in_executor(
+            # result, annotated_frame = await loop.run_in_executor(
+            result = await loop.run_in_executor(
                 self.thread_pool,
                 processor.process_frame,
                 frame,
@@ -1463,7 +1686,7 @@ async def main():
     parser.add_argument('--batch-size', type=int, default=8, help='Maximum number of frames to process in a batch')
     parser.add_argument('--batch-interval', type=float, default=0.5, help='Maximum time to wait before processing a batch (seconds)')
     parser.add_argument('--fps', type=float, default=5, help='Frames per second to process from each camera')
-    parser.add_argument('--send_fps', type=float, default=5, help='How frequently to hit the send_detection function')
+    parser.add_argument('--send_fps', type=float, default=1, help='How frequently to hit the send_detection function')
     
     args = parser.parse_args()
     
