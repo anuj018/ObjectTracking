@@ -619,9 +619,7 @@ class CameraProcessor:
             "image_url": "",
             "is_organised": True,
             "no_of_people": len(active_tracks),
-            "store_id": self.store_id,
-            "timestamp": timestamp,
-            "frame_number": frame_id,
+            "date_time": timestamp,
             "persons": entity_coordinates,
         }
         
@@ -973,8 +971,8 @@ class RTSPStreamProcessor:
             for task, metadata in tasks:
                 try:
                     result, annotated_frame = await task
-                    result["from_datetime"] = from_ts
-                    result["to_datetime"] = to_ts
+                    # result["from_datetime"] = from_ts
+                    # result["to_datetime"] = to_ts
                     # Calculate processing latency
                     queued_time = metadata.get('queued_time', time.time())
                     total_latency = time.time() - queued_time
@@ -984,7 +982,7 @@ class RTSPStreamProcessor:
 
                     # Add latency info to result
                     # result['processing_latency'] = total_latency
-                    logger.info(f"Processed frame {result['frame_number']} from camera {result['camera_id']} "
+                    logger.info(f"Processed frame {frame_id} from camera {result['camera_id']} "
                                f"with {result['no_of_people']} people (latency: {total_latency*1000:.1f}ms)")
                     results_to_send.append(result)
                     # current_time = time.time()
@@ -1481,7 +1479,7 @@ async def main():
     # Load camera configuration
     processor = None
     try:
-        # camera_config_remote = await fetch_camera_config(args.camera_endpoint)
+        # camera_config_remote = await fetch_camera_config("http://genfied-api.xperie.nz:8000/camera-config")
         with open(args.config, 'r') as f:
             base_config = json.load(f)
         # base_config['cameras'] = camera_config_remote.get('cameras', [])
