@@ -985,43 +985,43 @@ class RTSPStreamProcessor:
                     logger.info(f"Processed frame {frame_id} from camera {result['camera_id']} "
                                f"with {result['no_of_people']} people (latency: {total_latency*1000:.1f}ms)")
                     results_to_send.append(result)
-                    # current_time = time.time()
-                    # if current_time - self.last_send_time >= self.send_interval:
-                    #     send_task = asyncio.create_task(send_detection_data(results_to_send))
-                    #     send_tasks.append(send_task)
-                    #     self.last_send_time = current_time
-                    # else:
-                    #     logger.debug("Skipping send to maintain configured send rate")
+                    current_time = time.time()
+                    if current_time - self.last_send_time >= self.send_interval:
+                        send_task = asyncio.create_task(send_detection_data(results_to_send))
+                        send_tasks.append(send_task)
+                        self.last_send_time = current_time
+                    else:
+                        logger.debug("Skipping send to maintain configured send rate")
                 except Exception as task_error:
                     logger.error(f"Error processing task: {task_error}", exc_info=True)
 
             # After collecting all results
-            # if results_to_send:
-            #     success = await send_detection_data(results_to_send)
-            #     if not success:
-            #         logger.warning("Failed to send batch of results after multiple attempts")
+            if results_to_send:
+                success = await send_detection_data(results_to_send)
+                if not success:
+                    logger.warning("Failed to send batch of results after multiple attempts")
 
             # Make sure to send any remaining results after the loop
-            # if results_to_send:
-            #     current_time = time.time()
-            #     if current_time - self.last_send_time >= self.send_interval:
-            #         send_task = asyncio.create_task(send_detection_data(results_to_send))
-            #         send_tasks.append(send_task)
-            #         self.last_send_time = current_time
-            #         logger.info(f"Sent final batch of {len(results_to_send)} results")
-            #         results_to_send = []  # Clear the list after sending
-            #     else:
-            #         # If we need to respect the interval, schedule the send for later
-            #         wait_time = self.send_interval - (current_time - self.last_send_time)
-            #         logger.debug(f"Waiting {wait_time:.2f}s before sending final batch of {len(results_to_send)} results")
-            #         await asyncio.sleep(wait_time)
-            #         send_task = asyncio.create_task(send_detection_data(results_to_send))
-            #         send_tasks.append(send_task)
-            #         self.last_send_time = time.time()
-            #         results_to_send = []  # Clear the list after sending
-            #         # Wait for all send tasks to complete
-            # # if send_tasks:
-            #     # await asyncio.gather(*send_tasks)
+            if results_to_send:
+                current_time = time.time()
+                if current_time - self.last_send_time >= self.send_interval:
+                    send_task = asyncio.create_task(send_detection_data(results_to_send))
+                    send_tasks.append(send_task)
+                    self.last_send_time = current_time
+                    logger.info(f"Sent final batch of {len(results_to_send)} results")
+                    results_to_send = []  # Clear the list after sending
+                else:
+                    # If we need to respect the interval, schedule the send for later
+                    wait_time = self.send_interval - (current_time - self.last_send_time)
+                    logger.debug(f"Waiting {wait_time:.2f}s before sending final batch of {len(results_to_send)} results")
+                    await asyncio.sleep(wait_time)
+                    send_task = asyncio.create_task(send_detection_data(results_to_send))
+                    send_tasks.append(send_task)
+                    self.last_send_time = time.time()
+                    results_to_send = []  # Clear the list after sending
+                    # Wait for all send tasks to complete
+            # if send_tasks:
+                # await asyncio.gather(*send_tasks)
 
             # Log processing stats periodically
             current_time = time.time()
